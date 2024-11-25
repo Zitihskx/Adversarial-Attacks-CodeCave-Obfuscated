@@ -1,0 +1,147 @@
+from ctypes import sizeof
+from functools import total_ordering
+from shellgen import *
+import pefile
+import os 
+import mmap
+import sys
+
+#Align values to either File alignment or Section Alignment
+def align(val_to_align, alignment):
+    return ((val_to_align+alignment-1)/alignment)*alignment
+
+#Increases the size of file by required amount
+def IncreaseFileSize(binary, original_size):
+    fil = open(binary, 'a+b')
+    map = mmap.mmap(fil.fileno(), 0, access = mmap.ACCESS_WRITE)
+    map.resize(original_size + 0x2000)
+    map.close()
+    fil.close()
+
+
+def insertCaves(malware, target_section, cave_size=0):
+    original_size = os.path.getsize(malware)
+    print("Original Size", original_size)
+    pe = pefile.PE(malware, fast_load=True)
+    pe.write("new_malware.exe")
+    IncreaseFileSize("new_malware.exe", original_size)
+    malware = "new_malware.exe"
+    Increased_size = os.path.getsize(malware)
+    print("Increased Size", Increased_size)
+
+    pe = pefile.PE(malware, fast_load=True)
+
+    if not pe.is_exe():
+        pe.close()
+        raise NotPE()
+    elif pe.OPTIONAL_HEADER.DATA_DIRECTORY[14].VirtualAddress != 0 or pe.OPTIONAL_HEADER.DATA_DIRECTORY[14].Size != 0:
+        pe.close()
+        raise NotPE()
+    
+    #raw_addition = int(align(0x1000, pe.OPTIONAL_HEADER.FileAlignment))
+    virtual_addition = int(align(0x1000, pe.OPTIONAL_HEADER.SectionAlignment))
+
+
+    #Disabling the base relocation for a file
+    if hex(pe.FILE_HEADER.Characteristics)[-1:].upper() in ['2', '4', '6', '8', 'A','C','E']:
+         pe.FILE_HEADER.Characteristics += 0x1
+        
+    print("New header characteristics flag: "+hex(pe.FILE_HEADER.Characteristics))
+
+    #Writing assembly instructions at the end of text section
+    for section in pe.sections:
+        if section.Name.decode().rstrip('\x00') == '.text':
+            assembly_start = section.PointerToRawData + section.SizeOfRawData - 30
+            print(hex(assembly_start))
+
+    #Changing characteristics flag of target section where code cave is injected
+    for section in pe.sections:
+        last_va = section.VirtualAddress
+        last_vs = section.Misc_VirtualSize
+        last_ra = section.PointerToRawData
+        last_rs = section.SizeOfRawData
+        if section.Name.decode().rstrip('\x00') == target_section:
+            if target_section == '.text':
+                section.Characteristics=0xC0000020
+            elif target_section in {'.rdata', '.data', '.rsrc'}:
+                section.Characteristics=0xC0000040
+            elif target_section ==".reloc":
+                section.Characteristics=0xC2000040
+            else:
+                print("Unknown section encountered")
+                exit()
+            maxim_size = int(section.SizeOfRawData)
+            start_location = int(section.PointerToRawData)
+        
+    print("maximum size available "+ str(maxim_size))
+    print("STart address of given section  "+str(start_location))
+    cave_size = int(input("Enter size of the cave   ")) #Size of cave that we are about to insert
+    cave_location = int(input("Enter the location of cave   ")) #Starting location for cave
+
+    copy_to = last_ra + last_rs - cave_size  #where the cave chunk is being saved initially
+
+    cave_size_hex = hex(cave_size)[2:]
+    cave_location_hex = hex(cave_location+pe.OPTIONAL_HEADER.ImageBase)[2:]
+    #cave_source_hex = hex(original_size+pe.OPTIONAL_HEADER.ImageBase)[2:]
+    cave_source_hex = hex(copy_to + pe.OPTIONAL_HEADER.ImageBase)[2:]
+
+    temp_AEP = str(hex(pe.OPTIONAL_HEADER.AddressOfEntryPoint+pe.OPTIONAL_HEADER.ImageBase))[2:]
+    print(temp_AEP)
+
+    pe.OPTIONAL_HEADER.SizeOfImage += virtual_addition
+
+    
+    print("Copy destination    "+ cave_location_hex)
+    print("Cave source   "+ cave_source_hex)
+    print("Size of cave " + cave_size_hex)
+    print("entry   "+ temp_AEP)
+
+    pe.OPTIONAL_HEADER.AddressOfEntryPoint = assembly_start
+
+    print(f"Copy to  {hex(copy_to)}")
+    print(f"cave location  {hex(cave_location)}")
+    print(f"cave size  {hex(cave_size)}")
+
+    pe.__data__[copy_to : copy_to + cave_size] = pe.__data__[cave_location:cave_location+cave_size]
+
+    pe.__data__[cave_location:cave_location+cave_size] = b'\x00' * cave_size
+
+    shell_data = gen_shellcode(cave_location_hex, cave_source_hex, cave_size_hex, temp_AEP)
+    print(shell_data)
+    # print(shell_data.encode().decode('unicode-escape').encode('ISO-8859-1'))
+    # temp_datat = b'\xBE\x00\x70\x40\x00\xBF\x00\x18\x40\x00\xB9\x00\x10\x00\x00\xF3\xA4\xB8\x74\x26\x40\x00\xFF\xE0'
+    # print(temp_datat)
+
+   
+    pe.__data__[assembly_start:assembly_start+24] = shell_data.encode().decode('unicode-escape').encode('ISO-8859-1')
+    
+    pe.write("final_malware.exe")
+
+
+direct = "/home/user/Desktop/Code_caves/0B7FEFAF5C8F3A320DC08EC32BD5955F0B3B2E35034C8B2AD879AE6BDC2CC0BC.exe"
+#direct = "/home/user/Desktop/Code_caves/321D4F5EA4F06A908E91305571D23AE12CA483F5BA83CFD5F8665FE35C109EC2.exe"
+#direct = "/home/user/Desktop/Code_caves/ECFB97B9313F1D2678F23E3908AEA8FEEB03E4BD4034CDEC3C01F47F721FA863.exe"
+
+
+
+
+#direct = "putty.exe"
+inp = int(input("Select one of the sections to input code cave: \n 1 for .text \n 2 for .rdata \n 3 for .data \n 4 for .rsrc \n"))
+
+
+if inp == 1: 
+    target_section = '.text'
+elif inp == 2: 
+    target_section = '.rdata'
+elif inp == 3: 
+    target_section = '.data'
+elif inp == 4: 
+    target_section = '.rsrc'
+elif inp == 5:
+    target_section = '.reloc'
+else:
+    print("Invalid section value entered")
+    sys.exit()
+#size = int(input("Number of hex bytes you want to add to a file \n"))
+insertCaves(direct, target_section)
+
